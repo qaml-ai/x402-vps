@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cdpPaymentMiddleware } from "x402-cdp";
-import { describeRoute, openAPIRouteHandler } from "hono-openapi";
+import { extractParams } from "x402-ai";
+import { openapiFromMiddleware } from "x402-openapi";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -180,125 +181,103 @@ function getProvider(env: Env): VMProvider {
   return provider;
 }
 
-// === OpenAPI spec — must be before paymentMiddleware ===
+// === Route config ===
 
-app.get("/.well-known/openapi.json", openAPIRouteHandler(app, {
-  documentation: {
-    info: {
-      title: "x402 VPS Service",
-      description: "Time-boxed Ubuntu VMs with SSH access. Pay via x402, auto-destructs when expired. Pay-per-use via x402 protocol on Base mainnet.",
-      version: "1.0.0",
+const SYSTEM_PROMPT = `You are a parameter extractor for a VPS provisioning service.
+Extract the following from the user's message and return JSON:
+- "action": either "create" (spin up a new VM) or "status" (check status of an existing VM). Default "create". (required)
+- "duration_minutes": how long the VM stays alive in minutes, 1-60. Default 60. (optional)
+- "size": VM size, one of "small" (shared-cpu-1x, 256MB), "medium" (shared-cpu-2x, 512MB), "large" (shared-cpu-4x, 1GB). (optional)
+- "region": region code like "iad", "ord", "lax", "fra", "sin". (optional)
+- "machine_id": the machine ID to check status for. Required if action is "status". (optional)
+
+Map size names: "small" -> "shared-cpu-1x", "medium" -> "shared-cpu-2x", "large" -> "shared-cpu-4x".
+
+Return ONLY valid JSON, no explanation.
+Examples:
+- {"action": "create", "duration_minutes": 30, "size": "shared-cpu-2x"}
+- {"action": "status", "machine_id": "abc123"}
+- {"action": "create", "region": "fra"}`;
+
+const ROUTES = {
+  "POST /": {
+    accepts: [{ scheme: "exact", price: "$0.50", network: "eip155:8453", payTo: "0x0" as `0x${string}` }],
+    description: "Spin up a time-boxed Ubuntu VM with SSH access or check VM status. Send {\"input\": \"your request\"}",
+    mimeType: "application/json",
+    extensions: {
+      bazaar: {
+        info: {
+          input: {
+            type: "http",
+            method: "POST",
+            bodyType: "json",
+            body: {
+              input: { type: "string", description: "Describe what you want: create a VPS or check status of an existing one", required: true },
+            },
+          },
+          output: { type: "json" },
+        },
+        schema: {
+          properties: {
+            input: {
+              properties: { method: { type: "string", enum: ["POST"] } },
+              required: ["method"],
+            },
+          },
+        },
+      },
     },
-    servers: [{ url: "https://vps.camelai.io" }],
   },
-}));
-
-// === x402 payment gates ===
+};
 
 app.use(
-  cdpPaymentMiddleware(
-    (env) => ({
-      "POST /create": {
-        accepts: [
-          {
-            scheme: "exact",
-            price: "$0.50",
-            network: "eip155:8453",
-            payTo: env.SERVER_ADDRESS as `0x${string}`,
-          },
-        ],
-        description:
-          "Spin up a time-boxed Ubuntu VM with SSH access. Machine auto-destructs when time expires.",
-        mimeType: "application/json",
-        extensions: {
-          bazaar: {
-            discoverable: true,
-            inputSchema: {
-              bodyFields: {
-                duration_minutes: {
-                  type: "number",
-                  description: "How long the VM stays alive in minutes (1-60, default 30)",
-                  required: false,
-                },
-                size: {
-                  type: "string",
-                  description:
-                    'VM size: "shared-cpu-1x" (256MB), "shared-cpu-2x" (512MB), "shared-cpu-4x" (1GB). Default: shared-cpu-1x',
-                  required: false,
-                },
-                region: {
-                  type: "string",
-                  description: 'Region code (default "iad"). Examples: iad, ord, lax, fra, sin',
-                  required: false,
-                },
-              },
-            },
-          },
-        },
-      },
-      "GET /status/:machine_id": {
-        accepts: [
-          {
-            scheme: "exact",
-            price: "$0.001",
-            network: "eip155:8453",
-            payTo: env.SERVER_ADDRESS as `0x${string}`,
-          },
-        ],
-        description: "Check the current status of a VM by machine ID.",
-        mimeType: "application/json",
-        extensions: {
-          bazaar: {
-            discoverable: true,
-            inputSchema: {
-              pathFields: {
-                machine_id: {
-                  type: "string",
-                  description: "The machine ID returned from /create",
-                  required: true,
-                },
-              },
-            },
-          },
-        },
-      },
-    })
-  )
+  cdpPaymentMiddleware((env) => ({
+    "POST /": { ...ROUTES["POST /"], accepts: [{ ...ROUTES["POST /"].accepts[0], payTo: env.SERVER_ADDRESS as `0x${string}` }] },
+  }))
 );
 
-// === POST /create ===
+app.post("/", async (c) => {
+  const body = await c.req.json<{ input?: string }>();
+  if (!body?.input) {
+    return c.json({ error: "Missing 'input' field" }, 400);
+  }
 
-app.post("/create", describeRoute({
-  description: "Spin up a time-boxed Ubuntu VM with SSH access. Requires x402 payment ($0.50).",
-  requestBody: {
-    content: {
-      "application/json": {
-        schema: {
-          type: "object",
-          properties: {
-            duration_minutes: { type: "number", description: "How long the VM stays alive in minutes (1-60, default 30)" },
-            size: { type: "string", description: "VM size: shared-cpu-1x, shared-cpu-2x, shared-cpu-4x" },
-            region: { type: "string", description: "Region code (default: iad)" },
-          },
-        },
-      },
-    },
-  },
-  responses: {
-    200: { description: "VM created with SSH details", content: { "application/json": { schema: { type: "object" } } } },
-    400: { description: "Invalid size" },
-    402: { description: "Payment required" },
-    502: { description: "Failed to create VM" },
-  },
-}), async (c) => {
-  const body = await c.req.json().catch(() => ({}));
+  const params = await extractParams(c.env.CF_GATEWAY_TOKEN, SYSTEM_PROMPT, body.input);
+  const action = ((params.action as string) || "create").toLowerCase();
+
+  if (action === "status") {
+    const machineId = params.machine_id as string;
+    if (!machineId) {
+      return c.json({ error: "Could not determine machine_id to check status" }, 400);
+    }
+    const provider = getProvider(c.env);
+    try {
+      const result = await provider.status(c.env, machineId);
+      return c.json(result);
+    } catch (err: any) {
+      const status = err.message.includes("not found") ? 404 : 502;
+      return c.json({ error: err.message }, status);
+    }
+  }
+
+  // Default: create
   const provider = getProvider(c.env);
 
-  let duration = Number(body.duration_minutes) || 30;
+  let duration = Number(params.duration_minutes) || 60;
   if (duration < 1) duration = 1;
   if (duration > 60) duration = 60;
 
-  const size: string = body.size || "shared-cpu-1x";
+  // Map friendly size names to actual size keys
+  let size: string = (params.size as string) || "shared-cpu-1x";
+  const sizeMap: Record<string, string> = {
+    small: "shared-cpu-1x",
+    medium: "shared-cpu-2x",
+    large: "shared-cpu-4x",
+  };
+  if (sizeMap[size.toLowerCase()]) {
+    size = sizeMap[size.toLowerCase()];
+  }
+
   if (!provider.sizes[size]) {
     return c.json(
       { error: `Invalid size "${size}". Must be one of: ${Object.keys(provider.sizes).join(", ")}` },
@@ -306,7 +285,7 @@ app.post("/create", describeRoute({
     );
   }
 
-  const region: string = body.region || "iad";
+  const region: string = (params.region as string) || "iad";
 
   try {
     const result = await provider.create(c.env, { duration_minutes: duration, size, region });
@@ -320,36 +299,9 @@ app.post("/create", describeRoute({
   }
 });
 
-// === GET /status/:machine_id ===
-
-app.get("/status/:machine_id", describeRoute({
-  description: "Check the current status of a VM by machine ID. Requires x402 payment ($0.001).",
-  responses: {
-    200: { description: "VM status", content: { "application/json": { schema: { type: "object" } } } },
-    402: { description: "Payment required" },
-    404: { description: "Machine not found" },
-    502: { description: "Provider API error" },
-  },
-}), async (c) => {
-  const provider = getProvider(c.env);
-  try {
-    const result = await provider.status(c.env, c.req.param("machine_id"));
-    return c.json(result);
-  } catch (err: any) {
-    const status = err.message.includes("not found") ? 404 : 502;
-    return c.json({ error: err.message }, status);
-  }
-});
-
 // === DELETE /destroy/:machine_id (free) ===
 
-app.delete("/destroy/:machine_id", describeRoute({
-  description: "Destroy a VM by machine ID (free).",
-  responses: {
-    200: { description: "VM destroyed", content: { "application/json": { schema: { type: "object" } } } },
-    502: { description: "Failed to destroy VM" },
-  },
-}), async (c) => {
+app.delete("/destroy/:machine_id", async (c) => {
   const provider = getProvider(c.env);
   try {
     await provider.destroy(c.env, c.req.param("machine_id"));
@@ -359,22 +311,17 @@ app.delete("/destroy/:machine_id", describeRoute({
   }
 });
 
-// === Health ===
+app.get("/.well-known/openapi.json", openapiFromMiddleware("x402 VPS", "vps.camelai.io", ROUTES));
 
-app.get("/", describeRoute({
-  description: "Health check and service info.",
-  responses: {
-    200: { description: "Service info", content: { "application/json": { schema: { type: "object" } } } },
-  },
-}), (c) => {
+app.get("/", (c) => {
   return c.json({
     service: "x402-vps",
-    description: "Time-boxed Ubuntu VMs with SSH. Pay via x402, auto-destructs when expired.",
+    description: 'Time-boxed Ubuntu VMs with SSH. Send POST / with {"input": "create a medium VM for 30 minutes"}',
     provider: c.env.PROVIDER || "fly",
     available_providers: Object.keys(providers),
+    price: "$0.50 per request (Base mainnet)",
     endpoints: {
-      "POST /create": "$0.50",
-      "GET /status/:machine_id": "$0.001",
+      "POST /": "$0.50",
       "DELETE /destroy/:machine_id": "free",
     },
   });
