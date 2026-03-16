@@ -20,24 +20,37 @@
   ],
   "containers": [
     {
-      "class_name": "VPSContainer",
+      "class_name": "SandboxBasic",
       "image": "./Dockerfile",
-      "max_instances": 10,
-      "instance_type": "basic"
+      "instance_type": "basic",
+      "max_instances": 10
+    },
+    {
+      "class_name": "SandboxStandard",
+      "image": "./Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 5
     }
   ],
   "durable_objects": {
     "bindings": [
-      {
-        "name": "VPS_CONTAINER",
-        "class_name": "VPSContainer"
-      }
+      { "name": "SANDBOX_BASIC", "class_name": "SandboxBasic" },
+      { "name": "SANDBOX_STANDARD", "class_name": "SandboxStandard" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["VPSContainer"]
+    },
+    {
+      "tag": "v3",
+      "deleted_classes": ["VPSContainer"],
+      "new_sqlite_classes": ["SandboxLite", "SandboxBasic", "SandboxStandard"]
+    },
+    {
+      "tag": "v4",
+      "deleted_classes": ["SandboxLite"]
     }
   ]
 }
