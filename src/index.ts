@@ -87,7 +87,7 @@ app.post("/", async (c) => {
   if (duration < 1) duration = 1;
   if (duration > 60) duration = 60;
 
-  const containerId = `vps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const containerId = crypto.randomUUID();
   const expiresAt = new Date(Date.now() + duration * 60 * 1000).toISOString();
 
   // Get container stub and start it
