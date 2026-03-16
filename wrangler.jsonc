@@ -10,6 +10,10 @@
     {
       "pattern": "vps.camelai.io",
       "custom_domain": true
+    },
+    {
+      "pattern": "*.vps.camelai.io/*",
+      "zone_name": "camelai.io"
     }
   ],
   "kv_namespaces": [

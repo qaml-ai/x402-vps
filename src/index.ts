@@ -279,8 +279,29 @@ app.get("/", (c) => {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const proxyResponse = await proxyToSandbox(request, env);
-    if (proxyResponse) return proxyResponse;
+    // Custom proxy: route preview URLs to the correct sandbox binding
+    const url = new URL(request.url);
+    const host = url.hostname;
+    // Preview URL format: {port}-{sandboxId}-{token}.vps.camelai.io
+    if (host.endsWith(".vps.camelai.io") && host !== "vps.camelai.io") {
+      // Look up which binding this sandbox uses
+      const parts = host.replace(".vps.camelai.io", "").split("-");
+      // sandboxId is a UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (5 groups)
+      // Format: {port}-{uuid parts}-{token}
+      // Port is first, then 5 UUID segments, then token
+      if (parts.length >= 7) {
+        const sandboxId = parts.slice(1, 6).join("-");
+        const meta = await env.API_KEYS.get(`vps:${sandboxId}`);
+        if (meta) {
+          const data = JSON.parse(meta);
+          // Temporarily set env.Sandbox to the correct binding for proxyToSandbox
+          (env as any).Sandbox = env[data.binding as keyof Env];
+          const proxyResponse = await proxyToSandbox(request, env as any);
+          if (proxyResponse) return proxyResponse;
+        }
+      }
+    }
+
     return app.fetch(request, env, ctx);
   },
 };
