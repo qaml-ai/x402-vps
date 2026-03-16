@@ -276,6 +276,84 @@ app.delete("/process/:id/:pid", async (c) => {
   }
 });
 
+// POST /git/:id — clone a git repo
+app.post("/git/:id", async (c) => {
+  const result = await getSandboxOrFail(c.env, c.req.param("id"));
+  if ("error" in result) return c.json({ error: result.error }, result.status);
+
+  const body = await c.req.json<{ url: string; branch?: string; targetDir?: string; depth?: number }>().catch(() => null);
+  if (!body?.url) return c.json({ error: "Missing 'url' field" }, 400);
+
+  try {
+    await result.sandbox.gitCheckout(body.url, {
+      branch: body.branch,
+      targetDir: body.targetDir || "/workspace/repo",
+      depth: body.depth ?? 1,
+    });
+    return c.json({ cloned: true, url: body.url, targetDir: body.targetDir || "/workspace/repo" });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// POST /run-code/:id — execute code with rich output (Python/JS/TS)
+app.post("/run-code/:id", async (c) => {
+  const result = await getSandboxOrFail(c.env, c.req.param("id"));
+  if ("error" in result) return c.json({ error: result.error }, result.status);
+
+  const body = await c.req.json<{ code: string; language?: string; timeout?: number }>().catch(() => null);
+  if (!body?.code) return c.json({ error: "Missing 'code' field" }, 400);
+
+  try {
+    const ctx = await result.sandbox.createCodeContext({
+      language: (body.language as any) || "python",
+      timeout: (body.timeout ?? 30) * 1000,
+    });
+    const execResult = await result.sandbox.runCode(body.code, { context: ctx });
+    await result.sandbox.deleteCodeContext(ctx.id);
+    return c.json({
+      results: execResult.results,
+      logs: execResult.logs,
+      error: execResult.error || null,
+      execution_count: execResult.executionCount,
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// POST /mkdir/:id — create directories
+app.post("/mkdir/:id", async (c) => {
+  const result = await getSandboxOrFail(c.env, c.req.param("id"));
+  if ("error" in result) return c.json({ error: result.error }, result.status);
+
+  const body = await c.req.json<{ path: string }>().catch(() => null);
+  if (!body?.path) return c.json({ error: "Missing 'path' field" }, 400);
+
+  try {
+    await result.sandbox.mkdir(body.path, { recursive: true });
+    return c.json({ created: true, path: body.path });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// DELETE /file/:id — delete a file
+app.delete("/file/:id", async (c) => {
+  const result = await getSandboxOrFail(c.env, c.req.param("id"));
+  if ("error" in result) return c.json({ error: result.error }, result.status);
+
+  const path = c.req.query("path");
+  if (!path) return c.json({ error: "Missing 'path' query parameter" }, 400);
+
+  try {
+    await result.sandbox.deleteFile(path);
+    return c.json({ deleted: true, path });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
 // POST /expose/:id — expose a port
 app.post("/expose/:id", async (c) => {
   const result = await getSandboxOrFail(c.env, c.req.param("id"));

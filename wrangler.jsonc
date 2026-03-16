@@ -27,13 +27,15 @@
       "class_name": "SandboxBasic",
       "image": "./Dockerfile",
       "instance_type": "basic",
-      "max_instances": 10
+      "max_instances": 10,
+      "rollout_active_grace_period": 900
     },
     {
       "class_name": "SandboxStandard",
       "image": "./Dockerfile",
       "instance_type": "standard-2",
-      "max_instances": 5
+      "max_instances": 5,
+      "rollout_active_grace_period": 900
     }
   ],
   "durable_objects": {
