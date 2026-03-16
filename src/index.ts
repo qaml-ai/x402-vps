@@ -133,6 +133,7 @@ for (const [name, tier] of Object.entries(TIERS)) {
         write_file: `https://vps.camelai.io/file/${sandboxId}`,
         read_file: `https://vps.camelai.io/file/${sandboxId}?path=/workspace/file.txt`,
         start_process: `https://vps.camelai.io/start-process/${sandboxId}`,
+        processes: `https://vps.camelai.io/processes/${sandboxId}`,
         expose_port: `https://vps.camelai.io/expose/${sandboxId}`,
         status: `https://vps.camelai.io/status/${sandboxId}`,
         destroy: `https://vps.camelai.io/destroy/${sandboxId}`,
@@ -197,7 +198,15 @@ app.post("/start-process/:id", async (c) => {
   const result = await getSandboxOrFail(c.env, c.req.param("id"));
   if ("error" in result) return c.json({ error: result.error }, result.status);
 
-  const body = await c.req.json<{ command: string; cwd?: string; env?: Record<string, string> }>().catch(() => null);
+  const body = await c.req.json<{
+    command: string;
+    cwd?: string;
+    env?: Record<string, string>;
+    wait_for_port?: number;
+    wait_for_port_options?: { path?: string; timeout?: number; status?: { min?: number; max?: number } };
+    wait_for_log?: string;
+    wait_for_log_timeout?: number;
+  }>().catch(() => null);
   if (!body?.command) return c.json({ error: "Missing 'command' field" }, 400);
 
   try {
@@ -205,7 +214,63 @@ app.post("/start-process/:id", async (c) => {
       cwd: body.cwd,
       env: body.env,
     });
-    return c.json({ pid: proc.pid, command: body.command });
+
+    const response: Record<string, any> = { pid: proc.pid, command: body.command };
+
+    // Wait for port readiness if requested
+    if (body.wait_for_port) {
+      try {
+        await proc.waitForPort(body.wait_for_port, {
+          path: body.wait_for_port_options?.path,
+          timeout: body.wait_for_port_options?.timeout ?? 30000,
+          status: body.wait_for_port_options?.status ?? { min: 200, max: 599 },
+        });
+        response.port_ready = true;
+        response.port = body.wait_for_port;
+      } catch (err: any) {
+        response.port_ready = false;
+        response.port_error = err.message;
+      }
+    }
+
+    // Wait for log pattern if requested
+    if (body.wait_for_log) {
+      try {
+        await proc.waitForLog(body.wait_for_log, body.wait_for_log_timeout ?? 30000);
+        response.log_matched = true;
+      } catch (err: any) {
+        response.log_matched = false;
+        response.log_error = err.message;
+      }
+    }
+
+    return c.json(response);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// GET /processes/:id — list running processes
+app.get("/processes/:id", async (c) => {
+  const result = await getSandboxOrFail(c.env, c.req.param("id"));
+  if ("error" in result) return c.json({ error: result.error }, result.status);
+
+  try {
+    const processes = await result.sandbox.listProcesses();
+    return c.json({ processes });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// DELETE /process/:id/:pid — kill a process
+app.delete("/process/:id/:pid", async (c) => {
+  const result = await getSandboxOrFail(c.env, c.req.param("id"));
+  if ("error" in result) return c.json({ error: result.error }, result.status);
+
+  try {
+    await result.sandbox.killProcess(c.req.param("pid"));
+    return c.json({ killed: true, pid: c.req.param("pid") });
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
   }
@@ -270,6 +335,9 @@ app.get("/", (c) => {
       "POST /exec/:id": { body: { command: "string", timeout: "optional seconds", cwd: "optional" } },
       "PUT /file/:id": { body: { path: "string", content: "string" } },
       "GET /file/:id?path=...": "read a file",
+      "POST /start-process/:id": { body: { command: "string", cwd: "optional", env: "optional object", wait_for_port: "optional port number", wait_for_log: "optional log pattern" } },
+      "GET /processes/:id": "list running processes",
+      "DELETE /process/:id/:pid": "kill a process",
       "POST /expose/:id": { body: { port: "number", name: "optional" } },
       "GET /status/:id": "check sandbox status",
       "DELETE /destroy/:id": "destroy sandbox early",
