@@ -397,29 +397,115 @@ app.delete("/destroy/:id", async (c) => {
 
 app.get("/.well-known/openapi.json", openapiFromMiddleware("x402 VPS", "vps.camelai.io", ROUTES));
 
+const DOCS_MARKDOWN = `# vps.camelai.io — Sandbox API
+
+Time-boxed Ubuntu sandboxes on Cloudflare. Pay once, get a full Linux environment with exec, file ops, git, code execution, and port exposure. Priced at Cloudflare cost — no markup.
+
+Part of [camelai.io](https://camelai.io).
+
+## Create a Sandbox
+
+POST to a tier endpoint to create. Returns a sandbox ID and endpoint URLs.
+
+| Endpoint | Size | Duration | Price |
+|----------|------|----------|-------|
+| \`POST /basic-10\` | 1/4 vCPU, 1GB RAM, 4GB disk | 10 min | $0.005 |
+| \`POST /basic-30\` | 1/4 vCPU, 1GB RAM, 4GB disk | 30 min | $0.014 |
+| \`POST /basic-60\` | 1/4 vCPU, 1GB RAM, 4GB disk | 60 min | $0.028 |
+| \`POST /standard-10\` | 1 vCPU, 6GB RAM, 12GB disk | 10 min | $0.022 |
+| \`POST /standard-30\` | 1 vCPU, 6GB RAM, 12GB disk | 30 min | $0.065 |
+| \`POST /standard-60\` | 1 vCPU, 6GB RAM, 12GB disk | 60 min | $0.129 |
+
+Pre-installed: Python 3.11, Node.js 20, git, curl, wget, jq.
+
+## Sandbox Endpoints (free after creation)
+
+All endpoints below use the sandbox ID returned from creation.
+
+### Execute Commands
+
+\`POST /exec/:id\` — run a shell command and get stdout/stderr/exit_code.
+
+\`\`\`json
+{"command": "python3 --version", "timeout": 30, "cwd": "/workspace"}
+\`\`\`
+
+### File Operations
+
+- \`PUT /file/:id\` — write a file: \`{"path": "/workspace/app.py", "content": "print('hello')"}\`
+- \`GET /file/:id?path=/workspace/app.py\` — read a file
+- \`DELETE /file/:id?path=/workspace/app.py\` — delete a file
+- \`POST /mkdir/:id\` — create directories: \`{"path": "/workspace/src/components"}\`
+
+### Git
+
+\`POST /git/:id\` — clone a repo:
+
+\`\`\`json
+{"url": "https://github.com/user/repo", "branch": "main", "targetDir": "/workspace/repo", "depth": 1}
+\`\`\`
+
+### Run Code (Rich Output)
+
+\`POST /run-code/:id\` — execute Python or JavaScript with persistent state. Returns rich output (text, HTML tables, charts).
+
+\`\`\`json
+{"code": "import pandas as pd\\ndf = pd.DataFrame({'x': [1,2,3]})\\ndf", "language": "python"}
+\`\`\`
+
+### Background Processes
+
+\`POST /start-process/:id\` — start a long-running process. Optionally wait for a port or log pattern.
+
+\`\`\`json
+{"command": "python3 app.py", "cwd": "/workspace", "wait_for_port": 8080}
+\`\`\`
+
+- \`GET /processes/:id\` — list running processes
+- \`DELETE /process/:id/:pid\` — kill a process
+
+### Expose Ports
+
+\`POST /expose/:id\` — expose a port to the internet. Returns a public preview URL.
+
+\`\`\`json
+{"port": 8080, "name": "my-app"}
+\`\`\`
+
+### Lifecycle
+
+- \`GET /status/:id\` — check sandbox status and expiry
+- \`DELETE /destroy/:id\` — destroy sandbox early (free)
+
+## Example: Deploy a Flask App
+
+\`\`\`bash
+# 1. Create a sandbox
+SANDBOX=$(curl -s -X POST https://vps.camelai.io/basic-30 | jq -r .sandbox_id)
+
+# 2. Write app
+curl -s -X PUT https://vps.camelai.io/file/$SANDBOX \\
+  -d '{"path": "/workspace/app.py", "content": "from flask import Flask\\napp = Flask(__name__)\\n@app.route(\\\"/\\\")\\ndef hello(): return \\\"Hello!\\\"\\napp.run(host=\\\"0.0.0.0\\\", port=8080)"}'
+
+# 3. Install Flask and start
+curl -s -X POST https://vps.camelai.io/exec/$SANDBOX -d '{"command": "pip3 install -q flask"}'
+curl -s -X POST https://vps.camelai.io/start-process/$SANDBOX -d '{"command": "python3 /workspace/app.py"}'
+
+# 4. Expose to internet
+curl -s -X POST https://vps.camelai.io/expose/$SANDBOX -d '{"port": 8080}'
+# Returns: {"port": 8080, "url": "https://8080-<id>-<token>.vps.camelai.io/"}
+\`\`\`
+
+## Payment
+
+Accepts USDC on Base, Polygon, or Solana via x402. Or use a Stripe API key (\`Authorization: Bearer sk_camel_...\`).
+
+See [camelai.io](https://camelai.io) for payment setup.
+`;
+
 app.get("/", (c) => {
-  return c.json({
-    service: "x402-vps",
-    description: "Time-boxed Ubuntu sandboxes on Cloudflare. Exec commands, write files, expose ports. Priced at Cloudflare cost.",
-    provider: "cloudflare-sandbox",
-    tiers: Object.entries(TIERS).map(([name, t]) => ({
-      endpoint: `POST /${name}`,
-      price: t.price,
-      size: t.size,
-      specs: t.specs,
-      duration: `${t.duration} minutes`,
-    })),
-    free_endpoints: {
-      "POST /exec/:id": { body: { command: "string", timeout: "optional seconds", cwd: "optional" } },
-      "PUT /file/:id": { body: { path: "string", content: "string" } },
-      "GET /file/:id?path=...": "read a file",
-      "POST /start-process/:id": { body: { command: "string", cwd: "optional", env: "optional object", wait_for_port: "optional port number", wait_for_log: "optional log pattern" } },
-      "GET /processes/:id": "list running processes",
-      "DELETE /process/:id/:pid": "kill a process",
-      "POST /expose/:id": { body: { port: "number", name: "optional" } },
-      "GET /status/:id": "check sandbox status",
-      "DELETE /destroy/:id": "destroy sandbox early",
-    },
+  return new Response(DOCS_MARKDOWN, {
+    headers: { "Content-Type": "text/markdown; charset=utf-8" },
   });
 });
 
